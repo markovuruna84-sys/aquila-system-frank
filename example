@@ -1,0 +1,1028 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Aquila · Scrappy Challenger System</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700;800&family=Instrument+Serif:ital@0;1&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<style>
+  html, body { margin: 0; padding: 0; background: #f0eee9; }
+  * { box-sizing: border-box; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" data-presets="react">
+
+// DesignCanvas.jsx — Figma-ish design canvas wrapper
+// Warm gray grid bg + Sections + Artboards + PostIt notes.
+// No assets, no deps.
+
+const DC = {
+  bg: '#f0eee9',
+  grid: 'rgba(0,0,0,0.06)',
+  label: 'rgba(60,50,40,0.7)',
+  title: 'rgba(40,30,20,0.85)',
+  subtitle: 'rgba(60,50,40,0.6)',
+  postitBg: '#fef4a8',
+  postitText: '#5a4a2a',
+  font: '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif',
+};
+
+// ─────────────────────────────────────────────────────────────
+// Main canvas — transform-based pan/zoom viewport
+//
+// Input mapping (Figma-style):
+//   • trackpad pinch  → zoom   (ctrlKey wheel; Safari gesture* events)
+//   • trackpad scroll → pan    (two-finger)
+//   • mouse wheel     → zoom   (notched; distinguished from trackpad scroll)
+//   • middle-drag / primary-drag-on-bg → pan
+//
+// Transform state lives in a ref and is written straight to the DOM
+// (translate3d + will-change) so wheel ticks don't go through React —
+// keeps pans at 60fps on dense canvases.
+// ─────────────────────────────────────────────────────────────
+function DesignCanvas({ children, minScale = 0.1, maxScale = 8, style = {} }) {
+  const vpRef = React.useRef(null);
+  const worldRef = React.useRef(null);
+  const tf = React.useRef({ x: 0, y: 0, scale: 1 });
+
+  const apply = React.useCallback(() => {
+    const { x, y, scale } = tf.current;
+    const el = worldRef.current;
+    if (el) el.style.transform = `translate3d(${x}px, ${y}px, 0) scale(${scale})`;
+  }, []);
+
+  React.useEffect(() => {
+    const vp = vpRef.current;
+    if (!vp) return;
+
+    const zoomAt = (cx, cy, factor) => {
+      const r = vp.getBoundingClientRect();
+      const px = cx - r.left, py = cy - r.top;
+      const t = tf.current;
+      const next = Math.min(maxScale, Math.max(minScale, t.scale * factor));
+      const k = next / t.scale;
+      // keep the world point under the cursor fixed
+      t.x = px - (px - t.x) * k;
+      t.y = py - (py - t.y) * k;
+      t.scale = next;
+      apply();
+    };
+
+    // Mouse-wheel vs trackpad-scroll heuristic. A physical wheel sends
+    // line-mode deltas (Firefox) or large integer pixel deltas with no X
+    // component (Chrome/Safari, typically multiples of 100/120). Trackpad
+    // two-finger scroll sends small/fractional pixel deltas, often with
+    // non-zero deltaX. ctrlKey is set by the browser for trackpad pinch.
+    const isMouseWheel = (e) =>
+      e.deltaMode !== 0 ||
+      (e.deltaX === 0 && Number.isInteger(e.deltaY) && Math.abs(e.deltaY) >= 40);
+
+    const onWheel = (e) => {
+      e.preventDefault();
+      if (isGesturing) return; // Safari: gesture* owns the pinch — discard concurrent wheels
+      if (e.ctrlKey) {
+        // trackpad pinch (or explicit ctrl+wheel)
+        zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.01));
+      } else if (isMouseWheel(e)) {
+        // notched mouse wheel — fixed-ratio step per click
+        zoomAt(e.clientX, e.clientY, Math.exp(-Math.sign(e.deltaY) * 0.18));
+      } else {
+        // trackpad two-finger scroll — pan
+        tf.current.x -= e.deltaX;
+        tf.current.y -= e.deltaY;
+        apply();
+      }
+    };
+
+    // Safari sends native gesture* events for trackpad pinch with a smooth
+    // e.scale; preferring these over the ctrl+wheel fallback gives a much
+    // better feel there. No-ops on other browsers. Safari also fires
+    // ctrlKey wheel events during the same pinch — isGesturing makes
+    // onWheel drop those entirely so they neither zoom nor pan.
+    let gsBase = 1;
+    let isGesturing = false;
+    const onGestureStart = (e) => { e.preventDefault(); isGesturing = true; gsBase = tf.current.scale; };
+    const onGestureChange = (e) => {
+      e.preventDefault();
+      zoomAt(e.clientX, e.clientY, (gsBase * e.scale) / tf.current.scale);
+    };
+    const onGestureEnd = (e) => { e.preventDefault(); isGesturing = false; };
+
+    // Drag-pan: middle button anywhere, or primary button starting on the
+    // canvas background (not inside an artboard).
+    let drag = null;
+    const onPointerDown = (e) => {
+      const onBg = e.target === vp || e.target === worldRef.current;
+      if (!(e.button === 1 || (e.button === 0 && onBg))) return;
+      e.preventDefault();
+      vp.setPointerCapture(e.pointerId);
+      drag = { id: e.pointerId, lx: e.clientX, ly: e.clientY };
+      vp.style.cursor = 'grabbing';
+    };
+    const onPointerMove = (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      tf.current.x += e.clientX - drag.lx;
+      tf.current.y += e.clientY - drag.ly;
+      drag.lx = e.clientX; drag.ly = e.clientY;
+      apply();
+    };
+    const onPointerUp = (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      vp.releasePointerCapture(e.pointerId);
+      drag = null;
+      vp.style.cursor = '';
+    };
+
+    vp.addEventListener('wheel', onWheel, { passive: false });
+    vp.addEventListener('gesturestart', onGestureStart, { passive: false });
+    vp.addEventListener('gesturechange', onGestureChange, { passive: false });
+    vp.addEventListener('gestureend', onGestureEnd, { passive: false });
+    vp.addEventListener('pointerdown', onPointerDown);
+    vp.addEventListener('pointermove', onPointerMove);
+    vp.addEventListener('pointerup', onPointerUp);
+    vp.addEventListener('pointercancel', onPointerUp);
+    return () => {
+      vp.removeEventListener('wheel', onWheel);
+      vp.removeEventListener('gesturestart', onGestureStart);
+      vp.removeEventListener('gesturechange', onGestureChange);
+      vp.removeEventListener('gestureend', onGestureEnd);
+      vp.removeEventListener('pointerdown', onPointerDown);
+      vp.removeEventListener('pointermove', onPointerMove);
+      vp.removeEventListener('pointerup', onPointerUp);
+      vp.removeEventListener('pointercancel', onPointerUp);
+    };
+  }, [apply, minScale, maxScale]);
+
+  const gridSvg = `url("data:image/svg+xml,%3Csvg width='120' height='120' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M120 0H0v120' fill='none' stroke='${encodeURIComponent(DC.grid)}' stroke-width='1'/%3E%3C/svg%3E")`;
+  return (
+    <div
+      ref={vpRef}
+      className="design-canvas"
+      style={{
+        height: '100vh', width: '100vw',
+        background: DC.bg,
+        overflow: 'hidden',
+        overscrollBehavior: 'none',
+        touchAction: 'none',
+        position: 'relative',
+        fontFamily: DC.font,
+        boxSizing: 'border-box',
+        ...style,
+      }}
+    >
+      <div
+        ref={worldRef}
+        style={{
+          position: 'absolute', top: 0, left: 0,
+          transformOrigin: '0 0',
+          willChange: 'transform',
+          width: 'max-content', minWidth: '100%',
+          minHeight: '100%',
+          padding: '60px 0 80px',
+          backgroundImage: gridSvg,
+          backgroundSize: '120px 120px',
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Section — title + subtitle + h-stack of artboards (no wrap)
+// ─────────────────────────────────────────────────────────────
+function DCSection({ title, subtitle, children, gap = 48 }) {
+  return (
+    <div style={{ marginBottom: 80, position: 'relative' }}>
+      <div style={{ padding: '0 60px 36px' }}>
+        <div style={{
+          fontSize: 22, fontWeight: 600, color: DC.title,
+          letterSpacing: -0.3, marginBottom: 4,
+        }}>{title}</div>
+        {subtitle && (
+          <div style={{
+            fontSize: 14, fontWeight: 400, color: DC.subtitle,
+          }}>{subtitle}</div>
+        )}
+      </div>
+      {/* h-stack — clips offscreen, never wraps */}
+      <div style={{
+        display: 'flex', gap, padding: '0 60px',
+        alignItems: 'flex-start', width: 'max-content',
+      }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Artboard — labeled card
+// ─────────────────────────────────────────────────────────────
+function DCArtboard({ label, children, width, height, style = {} }) {
+  return (
+    <div style={{ position: 'relative', flexShrink: 0 }}>
+      {label && (
+        <div style={{
+          position: 'absolute', bottom: '100%', left: 0,
+          paddingBottom: 8,
+          fontSize: 12, fontWeight: 500, color: DC.label,
+          whiteSpace: 'nowrap',
+        }}>{label}</div>
+      )}
+      <div style={{
+        borderRadius: 2,
+        boxShadow: '0 1px 3px rgba(0,0,0,0.08), 0 4px 16px rgba(0,0,0,0.06)',
+        overflow: 'hidden',
+        width, height,
+        background: '#fff',
+        ...style,
+      }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Post-it — absolute-positioned sticky note
+// ─────────────────────────────────────────────────────────────
+function DCPostIt({ children, top, left, right, bottom, rotate = -2, width = 180 }) {
+  return (
+    <div style={{
+      position: 'absolute', top, left, right, bottom, width,
+      background: DC.postitBg, padding: '14px 16px',
+      fontFamily: '"Comic Sans MS", "Marker Felt", "Segoe Print", cursive',
+      fontSize: 14, lineHeight: 1.4, color: DC.postitText,
+      boxShadow: '0 2px 8px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.08)',
+      transform: `rotate(${rotate}deg)`,
+      zIndex: 5,
+    }}>{children}</div>
+  );
+}
+
+Object.assign(window, { DesignCanvas, DCSection, DCArtboard, DCPostIt });
+
+
+</script>
+<script type="text/babel" data-presets="react">
+// Aquila IG — Direction A expanded: full system
+// 9 feed posts + 3 stories/reels + 9-up feed preview
+// Dark ↔ light variants via toggle on each post
+
+const IG = 1080;
+const STORY_H = 1920;
+const RENDER = 420;
+const STORY_RENDER_H = Math.round(RENDER * STORY_H / IG);
+
+const A = {
+  ink:    "#0a0a0a",
+  paper:  "#f4f2ed",
+  acid:   "#d6ff2e",
+  dim:    "rgba(244,242,237,0.55)",
+  dimInk: "rgba(10,10,10,0.55)",
+};
+
+// ─────────────────────────────────────────────────────────────
+// Primitives
+// ─────────────────────────────────────────────────────────────
+
+function Stripe({ label = "image", invert = false, style = {} }) {
+  const bg = invert ? "#1a1a1a" : "#d9d6d1";
+  const stripe = invert ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.07)";
+  const ink = invert ? "rgba(255,255,255,0.55)" : "rgba(0,0,0,0.55)";
+  return (
+    <div style={{
+      position: 'absolute', inset: 0,
+      background: `repeating-linear-gradient(135deg, ${stripe} 0 10px, transparent 10px 28px), ${bg}`,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      ...style,
+    }}>
+      <div style={{
+        fontFamily: '"IBM Plex Mono", ui-monospace, monospace',
+        fontSize: 12, letterSpacing: 1.2, color: ink,
+        textTransform: 'uppercase', padding: '5px 10px',
+        border: `1px solid ${ink}`,
+      }}>{label}</div>
+    </div>
+  );
+}
+
+function Frame({ children, label, w = IG, h = IG, render = RENDER, onFlip, dark, style = {} }) {
+  const scale = render / w;
+  return (
+    <div style={{ position: 'relative', flexShrink: 0 }}>
+      {label && (
+        <div style={{
+          position: 'absolute', top: -24, left: 0,
+          fontFamily: '"IBM Plex Mono", monospace',
+          fontSize: 10, letterSpacing: 1.5,
+          textTransform: 'uppercase', color: 'rgba(40,30,20,0.55)',
+        }}>{label}</div>
+      )}
+      {onFlip && (
+        <button onClick={onFlip} style={{
+          position: 'absolute', top: -26, right: 0,
+          background: 'transparent', border: '1px solid rgba(0,0,0,0.2)',
+          padding: '2px 8px', cursor: 'pointer',
+          fontFamily: '"IBM Plex Mono", monospace', fontSize: 10,
+          letterSpacing: 1.5, textTransform: 'uppercase', color: '#5a5247',
+        }}>{dark ? '◐ light' : '◑ dark'}</button>
+      )}
+      <div style={{
+        width: render, height: render * h / w, overflow: 'hidden',
+        background: '#fff',
+        boxShadow: '0 2px 6px rgba(0,0,0,0.08), 0 10px 40px rgba(0,0,0,0.08)',
+      }}>
+        <div style={{
+          width: w, height: h,
+          transform: `scale(${scale})`, transformOrigin: '0 0',
+          position: 'relative', ...style,
+        }}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function MonoLine({ size = 18, opacity = 0.6, color, children, style = {} }) {
+  return (
+    <div style={{
+      fontFamily: '"IBM Plex Mono", monospace',
+      fontSize: size, letterSpacing: 1.5, color, opacity,
+      textTransform: 'uppercase', ...style,
+    }}>{children}</div>
+  );
+}
+
+function Wordmark({ color, size = 32 }) {
+  return (
+    <div style={{
+      fontFamily: '"Inter Tight", system-ui, sans-serif',
+      fontWeight: 800, fontSize: size, letterSpacing: -0.6, color,
+    }}>AQUILA</div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// POSTS 1–9 (feed, 1080×1080)
+// Each post takes { dark } and flips its palette.
+// ─────────────────────────────────────────────────────────────
+
+// 1 — Hero tagline
+function P1({ dark }) {
+  const bg = dark ? A.ink : A.paper;
+  const fg = dark ? A.paper : A.ink;
+  return (
+    <div style={{
+      position: 'absolute', inset: 0, background: bg,
+      padding: 80, display: 'flex', flexDirection: 'column',
+      justifyContent: 'space-between',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <Wordmark color={fg} size={36} />
+        <MonoLine size={20} color={fg}>SINCE 1988</MonoLine>
+      </div>
+      <div style={{
+        fontFamily: '"Inter Tight", system-ui, sans-serif',
+        fontWeight: 800, fontSize: 128, lineHeight: 0.92,
+        letterSpacing: -3, color: fg,
+      }}>
+        Probably<br/>
+        the best bike<br/>
+        you've <span style={{ background: A.acid, color: A.ink, padding: '0 18px' }}>never</span><br/>
+        ridden.
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
+        <MonoLine size={20} color={fg}>— PROVEN PERFORMANCE</MonoLine>
+        <div style={{ textAlign: 'right' }}>
+          <MonoLine size={20} color={fg} opacity={0.9}>aquilacycles.ca</MonoLine>
+          <MonoLine size={20} color={fg}>@aquilacycles</MonoLine>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 2 — Manifesto (image top, type bottom)
+function P2({ dark }) {
+  const bg = dark ? A.ink : A.paper;
+  const fg = dark ? A.paper : A.ink;
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: bg }}>
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '58%' }}>
+        <Stripe label="hero — rider cornering, wet tarmac" invert />
+      </div>
+      <div style={{
+        position: 'absolute', left: 0, right: 0, bottom: 0, height: '42%',
+        padding: '60px 80px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+      }}>
+        <div style={{
+          fontFamily: '"Inter Tight", system-ui, sans-serif',
+          fontWeight: 800, fontSize: 92, lineHeight: 0.9,
+          letterSpacing: -2.4, color: fg,
+        }}>
+          No hype.<br/>
+          No excess.<br/>
+          <span style={{ fontStyle: 'italic', fontFamily: '"Instrument Serif", serif', fontWeight: 400 }}>
+            No compromise.
+          </span>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
+          <MonoLine size={18} color={fg}>PILLAR 03 · AUTHENTIC</MonoLine>
+          <Wordmark color={fg} size={22} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 3 — Pillar callout (split acid/image)
+function P3({ dark }) {
+  const bg = dark ? A.ink : A.paper;
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: bg, display: 'flex' }}>
+      <div style={{
+        width: '42%', background: A.acid,
+        padding: 72, display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+        color: A.ink,
+      }}>
+        <MonoLine size={20} opacity={1} color={A.ink}>
+          02 / 03<br/>Built to Measure
+        </MonoLine>
+        <div style={{
+          fontFamily: '"Inter Tight", system-ui, sans-serif',
+          fontWeight: 800, fontSize: 96, lineHeight: 0.88, letterSpacing: -2.4,
+        }}>
+          Perform-<br/>ance<br/>doesn't<br/>come out<br/>of a box.
+        </div>
+        <MonoLine size={18} opacity={1} color={A.ink}>AQUILA / SINCE 1988</MonoLine>
+      </div>
+      <div style={{ flex: 1, position: 'relative' }}>
+        <Stripe label="detail — frame / headtube build" invert />
+      </div>
+    </div>
+  );
+}
+
+// 4 — Product drop
+function P4({ dark }) {
+  const bg = dark ? A.ink : A.paper;
+  const fg = dark ? A.paper : A.ink;
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: bg, padding: 72 }}>
+      {/* top ticker */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <MonoLine size={18} color={fg}>◉ NEW BUILD · 04.2026</MonoLine>
+        <MonoLine size={18} color={fg}>EDITION 0428 / 50</MonoLine>
+      </div>
+
+      {/* product slab */}
+      <div style={{ position: 'absolute', top: 150, left: 72, right: 72, height: 600 }}>
+        <Stripe label="studio — complete build, side profile" invert={dark} />
+        {/* acid tag */}
+        <div style={{
+          position: 'absolute', top: 24, right: 24,
+          background: A.acid, color: A.ink, padding: '10px 16px',
+          fontFamily: '"Inter Tight", sans-serif', fontWeight: 800, fontSize: 22,
+          letterSpacing: -0.3,
+        }}>JUST DROPPED</div>
+      </div>
+
+      {/* bottom slab */}
+      <div style={{ position: 'absolute', bottom: 72, left: 72, right: 72 }}>
+        <div style={{
+          fontFamily: '"Inter Tight", sans-serif',
+          fontWeight: 800, fontSize: 78, lineHeight: 0.92,
+          letterSpacing: -1.8, color: fg, marginBottom: 20,
+        }}>
+          THE <span style={{ color: A.acid, background: A.ink, padding: '0 10px' }}>ESCARPMENT</span>.<br/>
+          Built for hills that hate you.
+        </div>
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
+          borderTop: `1px solid ${fg}`, paddingTop: 18,
+          fontFamily: '"IBM Plex Mono", monospace', fontSize: 15,
+          letterSpacing: 1, color: fg,
+        }}>
+          {[["FRAME", "T1100 carbon"], ["GROUP", "SRAM Red AXS"], ["WEIGHT", "6.9 kg"], ["STOCK", "50 only"]].map(([k,v],i)=>(
+            <div key={i}>
+              <div style={{ opacity: 0.55, marginBottom: 4 }}>{k}</div>
+              <div style={{ textTransform: 'none' }}>{v}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 5 — Price / industry takedown
+function P5({ dark }) {
+  const bg = dark ? A.ink : A.paper;
+  const fg = dark ? A.paper : A.ink;
+  const strike = dark ? 'rgba(255,255,255,0.35)' : 'rgba(10,10,10,0.35)';
+  return (
+    <div style={{
+      position: 'absolute', inset: 0, background: bg,
+      padding: 80, display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+    }}>
+      <MonoLine size={18} color={fg}>PSA · FROM THE SHOP FLOOR</MonoLine>
+
+      <div style={{
+        fontFamily: '"Inter Tight", sans-serif',
+        fontWeight: 800, fontSize: 132, lineHeight: 0.9,
+        letterSpacing: -3.4, color: fg,
+      }}>
+        You're not<br/>
+        <span style={{ position: 'relative', display: 'inline-block' }}>
+          <span>paying for</span>
+          <span style={{
+            position: 'absolute', left: 0, right: 0, top: '52%',
+            borderTop: `10px solid ${A.acid}`, transform: 'rotate(-2deg)',
+          }} />
+        </span>
+        <br/>
+        the&nbsp;bike.<br/>
+        <span style={{ fontStyle: 'italic', fontFamily: '"Instrument Serif", serif', fontWeight: 400, fontSize: 144 }}>
+          You're paying
+        </span><br/>
+        <span style={{ fontStyle: 'italic', fontFamily: '"Instrument Serif", serif', fontWeight: 400, fontSize: 144 }}>
+          for the billboard.
+        </span>
+      </div>
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end' }}>
+        <MonoLine size={18} color={fg}>OUTSMART.<br/>DON'T OUTSPEND.</MonoLine>
+        <Wordmark color={fg} size={28} />
+      </div>
+    </div>
+  );
+}
+
+// 6 — Rider quote
+function P6({ dark }) {
+  const bg = dark ? A.ink : A.paper;
+  const fg = dark ? A.paper : A.ink;
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: bg }}>
+      {/* side rail image */}
+      <div style={{ position: 'absolute', top: 0, bottom: 0, left: 0, width: '40%' }}>
+        <Stripe label="rider portrait · studio, B&W" invert />
+      </div>
+      {/* quote */}
+      <div style={{
+        position: 'absolute', top: 80, left: '44%', right: 80, bottom: 80,
+        display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+      }}>
+        <MonoLine size={18} color={fg}>RIDER · 09 / MAYA L.</MonoLine>
+        <div>
+          <div style={{
+            fontFamily: '"Instrument Serif", serif',
+            fontSize: 220, lineHeight: 0.6, color: A.acid,
+            fontStyle: 'italic', marginBottom: -20,
+          }}>“</div>
+          <div style={{
+            fontFamily: '"Instrument Serif", serif', fontStyle: 'italic',
+            fontSize: 68, lineHeight: 1.04, color: fg, letterSpacing: -0.3,
+          }}>
+            I was done<br/>
+            buying other<br/>
+            people's<br/>
+            taste.
+          </div>
+          <div style={{
+            fontFamily: '"Inter Tight", sans-serif', fontWeight: 700,
+            fontSize: 28, color: fg, marginTop: 18,
+          }}>— Maya, Build No. 0317</div>
+        </div>
+        <MonoLine size={18} color={fg}>#WhyIRideAquila</MonoLine>
+      </div>
+    </div>
+  );
+}
+
+// 7 — Kadre ride invite (stencil poster feel)
+function P7({ dark }) {
+  const bg = dark ? A.ink : A.paper;
+  const fg = dark ? A.paper : A.ink;
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: bg, padding: 64 }}>
+      {/* corner barcode marks */}
+      <div style={{ position: 'absolute', top: 32, left: 32, display: 'flex', gap: 3 }}>
+        {[6,14,4,10,6,14,4,10,4,12].map((w,i)=><div key={i} style={{ width:w, height:36, background: fg }}/>)}
+      </div>
+      <div style={{ position: 'absolute', top: 32, right: 32 }}>
+        <MonoLine size={16} color={fg}>KADRE · 04·21·26</MonoLine>
+      </div>
+
+      <div style={{
+        position: 'absolute', top: 120, left: 64, right: 64,
+      }}>
+        <div style={{
+          fontFamily: '"Inter Tight", sans-serif', fontWeight: 800,
+          fontSize: 220, lineHeight: 0.85, letterSpacing: -6, color: fg,
+        }}>SUN<br/>DAY.</div>
+      </div>
+
+      <div style={{
+        position: 'absolute', top: 560, left: 64, right: 64,
+      }}>
+        <div style={{
+          fontFamily: '"Instrument Serif", serif', fontStyle: 'italic', fontWeight: 400,
+          fontSize: 96, lineHeight: 0.95, color: A.acid,
+        }}>Ride first.<br/>Talk later.</div>
+      </div>
+
+      {/* details strip */}
+      <div style={{
+        position: 'absolute', bottom: 64, left: 64, right: 64,
+        display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)',
+        borderTop: `2px solid ${fg}`, paddingTop: 22,
+        fontFamily: '"IBM Plex Mono", monospace', fontSize: 16,
+        letterSpacing: 1, color: fg,
+      }}>
+        <div><div style={{ opacity: 0.55 }}>MEET</div>7AM · RACER SPORTIF</div>
+        <div><div style={{ opacity: 0.55 }}>PACE</div>64 KM · ENDURANCE</div>
+        <div><div style={{ opacity: 0.55 }}>PRICE</div>FREE · NO DROP</div>
+      </div>
+    </div>
+  );
+}
+
+// 8 — Stats brag (numbers as hero)
+function P8({ dark }) {
+  const bg = dark ? A.ink : A.paper;
+  const fg = dark ? A.paper : A.ink;
+  const stats = [
+    ["428", "bikes\nbuilt this year"],
+    ["01", "at a time\nhand assembled"],
+    ["38", "years\non the same block"],
+    ["00", "stock builds\never"],
+  ];
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: bg, padding: 72,
+      display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <MonoLine size={18} color={fg}>THE NUMBERS · 2026</MonoLine>
+        <Wordmark color={fg} size={28} />
+      </div>
+
+      <div style={{
+        display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)',
+        gap: 0, borderTop: `1px solid ${fg}`, borderLeft: `1px solid ${fg}`,
+      }}>
+        {stats.map(([n, l], i) => (
+          <div key={i} style={{
+            padding: '32px 28px 28px',
+            borderRight: `1px solid ${fg}`,
+            borderBottom: `1px solid ${fg}`,
+            minHeight: 280,
+          }}>
+            <div style={{
+              fontFamily: '"Inter Tight", sans-serif', fontWeight: 800,
+              fontSize: 180, lineHeight: 0.9, letterSpacing: -6,
+              color: i === 3 ? A.acid : fg,
+            }}>{n}</div>
+            <div style={{
+              fontFamily: '"IBM Plex Mono", monospace', fontSize: 18,
+              letterSpacing: 0.8, color: fg, opacity: 0.75,
+              whiteSpace: 'pre-line', marginTop: 8,
+            }}>{l}</div>
+          </div>
+        ))}
+      </div>
+
+      <MonoLine size={18} color={fg}>
+        EVERY AQUILA IS LIMITED.<br/>NUMBERED. SIGNED.
+      </MonoLine>
+    </div>
+  );
+}
+
+// 9 — Typographic closer / CTA
+function P9({ dark }) {
+  const bg = dark ? A.ink : A.acid;
+  const fg = dark ? A.acid : A.ink;
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: bg, padding: 80,
+      display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+    }}>
+      <MonoLine size={18} color={fg} opacity={1}>FIT · BUILD · RIDE</MonoLine>
+
+      <div style={{
+        fontFamily: '"Inter Tight", sans-serif', fontWeight: 800,
+        fontSize: 156, lineHeight: 0.88, letterSpacing: -4, color: fg,
+      }}>
+        Your first<br/>
+        <span style={{ fontStyle: 'italic', fontFamily: '"Instrument Serif", serif', fontWeight: 400, fontSize: 180 }}>Aquila</span><br/>
+        starts with<br/>
+        a&nbsp;conversation.
+      </div>
+
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end',
+      }}>
+        <div style={{
+          fontFamily: '"Inter Tight", sans-serif', fontWeight: 700,
+          fontSize: 28, color: fg,
+          borderBottom: `3px solid ${fg}`, paddingBottom: 4,
+        }}>BOOK A FITTING →</div>
+        <MonoLine size={20} color={fg} opacity={1}>AQUILACYCLES.CA</MonoLine>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// STORIES / REELS (1080 × 1920)
+// ─────────────────────────────────────────────────────────────
+
+function S1({ dark = true }) {
+  const bg = dark ? A.ink : A.paper;
+  const fg = dark ? A.paper : A.ink;
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: bg, padding: 80,
+      display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+        <Wordmark color={fg} size={38} />
+        <MonoLine size={22} color={fg}>REEL · 01</MonoLine>
+      </div>
+
+      <div style={{
+        fontFamily: '"Inter Tight", sans-serif', fontWeight: 800,
+        fontSize: 200, lineHeight: 0.86, letterSpacing: -5, color: fg,
+      }}>
+        Watch<br/>
+        me ride<br/>
+        a bike<br/>
+        <span style={{ background: A.acid, color: A.ink, padding: '0 18px' }}>nobody</span><br/>
+        has heard<br/>
+        of.
+      </div>
+
+      <MonoLine size={22} color={fg}>PROBABLY THE BEST.<br/>DEFINITELY YOURS.</MonoLine>
+    </div>
+  );
+}
+
+function S2({ dark = false }) {
+  const bg = dark ? A.ink : A.paper;
+  const fg = dark ? A.paper : A.ink;
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: bg }}>
+      <div style={{ position: 'absolute', inset: 0 }}>
+        <Stripe label="full-bleed — climbing silhouette at dusk" invert />
+      </div>
+      <div style={{
+        position: 'absolute', inset: 0,
+        background: 'linear-gradient(180deg, rgba(0,0,0,0.0) 20%, rgba(0,0,0,0.8) 100%)',
+      }} />
+      <div style={{
+        position: 'absolute', top: 80, left: 80, right: 80,
+      }}>
+        <MonoLine size={22} color={A.paper}>◉ LIVE · KADRE RIDE</MonoLine>
+      </div>
+      <div style={{
+        position: 'absolute', left: 80, right: 80, bottom: 160,
+        fontFamily: '"Inter Tight", sans-serif', fontWeight: 800,
+        fontSize: 144, lineHeight: 0.9, letterSpacing: -3.5, color: A.paper,
+      }}>
+        Hills<br/>
+        that<br/>
+        <span style={{ color: A.acid }}>hate</span><br/>
+        you.
+      </div>
+      <div style={{
+        position: 'absolute', bottom: 80, left: 80, right: 80,
+        display: 'flex', justifyContent: 'space-between',
+      }}>
+        <MonoLine size={20} color={A.paper}>SWIPE UP</MonoLine>
+        <Wordmark color={A.paper} size={24} />
+      </div>
+    </div>
+  );
+}
+
+function S3({ dark = true }) {
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: A.acid, padding: 80,
+      display: 'flex', flexDirection: 'column', justifyContent: 'space-between',
+    }}>
+      <MonoLine size={22} color={A.ink} opacity={1}>ANNOUNCEMENT · 04·26</MonoLine>
+
+      <div style={{
+        fontFamily: '"Instrument Serif", serif', fontWeight: 400,
+        fontSize: 200, lineHeight: 0.92, letterSpacing: -3, color: A.ink,
+      }}>
+        The<br/>
+        <span style={{ fontStyle: 'italic' }}>Escarpment</span><br/>
+        <span style={{ fontFamily: '"Inter Tight", sans-serif', fontWeight: 800, fontSize: 220, letterSpacing: -5 }}>
+          drops<br/>April&nbsp;26.
+        </span>
+      </div>
+
+      <div style={{
+        fontFamily: '"Inter Tight", sans-serif', fontWeight: 800,
+        fontSize: 40, color: A.ink, letterSpacing: -0.4,
+        borderTop: `3px solid ${A.ink}`, paddingTop: 20,
+      }}>50 bikes. That's it. Get on the list →</div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// 9-UP FEED PREVIEW (the Instagram grid)
+// ─────────────────────────────────────────────────────────────
+
+function FeedTile({ children }) {
+  // each tile is 1080x1080 rendered at 220
+  const r = 220;
+  const scale = r / IG;
+  return (
+    <div style={{
+      width: r, height: r, overflow: 'hidden',
+      background: '#000',
+      outline: '0.5px solid rgba(0,0,0,0.1)',
+    }}>
+      <div style={{
+        width: IG, height: IG,
+        transform: `scale(${scale})`, transformOrigin: '0 0',
+        position: 'relative',
+      }}>{children}</div>
+    </div>
+  );
+}
+
+function FeedPreview({ posts }) {
+  return (
+    <div style={{
+      background: '#000', padding: 2,
+      display: 'grid', gridTemplateColumns: 'repeat(3, 220px)', gap: 2,
+      width: 'max-content',
+      boxShadow: '0 2px 8px rgba(0,0,0,0.1), 0 20px 60px rgba(0,0,0,0.12)',
+    }}>
+      {posts.map((P, i) => <FeedTile key={i}><P /></FeedTile>)}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// APP
+// ─────────────────────────────────────────────────────────────
+
+function FlipFrame({ label, Comp, w, h }) {
+  const [dark, setDark] = React.useState(true);
+  return (
+    <Frame label={label} onFlip={() => setDark(!dark)} dark={dark} w={w} h={h}>
+      <Comp dark={dark} />
+    </Frame>
+  );
+}
+
+function Section({ title, note, children, gap = 40 }) {
+  return (
+    <div style={{ marginBottom: 80 }}>
+      <div style={{ padding: '0 60px 28px', maxWidth: 1000 }}>
+        <div style={{
+          fontFamily: '"IBM Plex Mono", monospace', fontSize: 12,
+          letterSpacing: 2, color: '#8a8275', textTransform: 'uppercase',
+        }}>{title.label}</div>
+        <div style={{
+          fontFamily: '"Inter Tight", sans-serif', fontSize: 36, fontWeight: 700,
+          letterSpacing: -1, color: '#1a1a1a', marginTop: 6,
+        }}>{title.name}</div>
+        {note && <div style={{
+          fontFamily: 'system-ui', fontSize: 14, color: '#5a5247',
+          lineHeight: 1.55, marginTop: 8, maxWidth: 780,
+        }}>{note}</div>}
+      </div>
+      <div style={{ padding: '20px 60px 0', display: 'flex', gap, flexWrap: 'nowrap', alignItems: 'flex-start', width: 'max-content' }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const feedPosts = [
+    () => <P1 dark/>, () => <P2 dark/>, () => <P3 dark={false}/>,
+    () => <P4 dark={false}/>, () => <P5 dark/>, () => <P6 dark/>,
+    () => <P7 dark={false}/>, () => <P8 dark/>, () => <P9 dark={false}/>,
+  ];
+
+  return (
+    <DesignCanvas minScale={0.1} maxScale={3}>
+      {/* Intro */}
+      <div style={{ padding: '0 60px 40px', maxWidth: 1200 }}>
+        <div style={{
+          fontFamily: '"IBM Plex Mono", monospace', fontSize: 12,
+          letterSpacing: 2, color: '#8a8275', textTransform: 'uppercase',
+        }}>Aquila · Direction A — Scrappy Challenger · Expanded System</div>
+        <div style={{
+          fontFamily: '"Instrument Serif", serif', fontWeight: 400,
+          fontSize: 68, lineHeight: 1, letterSpacing: -1.5,
+          color: '#1a1a1a', marginTop: 10,
+        }}>
+          The full <span style={{ fontStyle: 'italic' }}>scrappy</span> system<span style={{ color: '#d6ff2e', background: '#0a0a0a', padding: '0 8px' }}>.</span>
+        </div>
+        <div style={{
+          marginTop: 20, maxWidth: 820, lineHeight: 1.55,
+          fontFamily: 'system-ui', fontSize: 15, color: '#5a5247',
+        }}>
+          Nine feed posts, three stories/reels, and a 9-up preview of the grid. Every post has a
+          dark ↔ light toggle in its corner so you can see how each treatment holds up on either
+          palette. Copy stays in the playbook's voice — bold, honest, sass without the mean.
+        </div>
+      </div>
+
+      {/* FEED POSTS */}
+      <Section
+        title={{ label: "01 · Feed Posts", name: "Nine posts, full content mix" }}
+        note="Hero tagline → manifesto → pillar → product drop → takedown → rider quote → ride invite → stats → CTA closer. Click ◐ light / ◑ dark to flip the palette on any post."
+      >
+        <FlipFrame label="01 · hero tagline" Comp={P1} />
+        <FlipFrame label="02 · manifesto"    Comp={P2} />
+        <FlipFrame label="03 · pillar"       Comp={P3} />
+        <FlipFrame label="04 · product drop" Comp={P4} />
+        <FlipFrame label="05 · takedown"     Comp={P5} />
+        <FlipFrame label="06 · rider quote"  Comp={P6} />
+        <FlipFrame label="07 · ride invite"  Comp={P7} />
+        <FlipFrame label="08 · stats"        Comp={P8} />
+        <FlipFrame label="09 · CTA closer"   Comp={P9} />
+      </Section>
+
+      {/* STORIES */}
+      <Section
+        title={{ label: "02 · Stories & Reels", name: "Vertical formats (9:16)" }}
+        note="Same DNA, stretched tall. Reel covers and story drops — built to hold up with motion on top."
+        gap={48}
+      >
+        <FlipFrame label="story · reel cover"    Comp={S1} w={IG} h={STORY_H} />
+        <FlipFrame label="story · ride live"     Comp={S2} w={IG} h={STORY_H} />
+        <FlipFrame label="story · drop announce" Comp={S3} w={IG} h={STORY_H} />
+      </Section>
+
+      {/* FEED PREVIEW */}
+      <Section
+        title={{ label: "03 · Feed Preview", name: "9-up grid cadence" }}
+        note="How the feed reads top-to-bottom. Notice the rhythm: two black, one light, one light, two black, one light, one black, one acid. The acid closer sits at the 3x3 corner — it's the first thing a new visitor sees."
+      >
+        <div style={{ position: 'relative', paddingTop: 30 }}>
+          <div style={{
+            position: 'absolute', top: 0, left: 0,
+            fontFamily: '"IBM Plex Mono", monospace', fontSize: 11,
+            letterSpacing: 1.5, color: '#8a8275',
+          }}>@AQUILACYCLES · APRIL '26</div>
+          <FeedPreview posts={feedPosts} />
+        </div>
+
+        {/* sidecar notes */}
+        <div style={{
+          width: 340, padding: '30px 28px',
+          background: '#fff', boxShadow: '0 1px 3px rgba(0,0,0,0.06), 0 8px 30px rgba(0,0,0,0.05)',
+          fontFamily: 'system-ui', fontSize: 13, color: '#3d3830', lineHeight: 1.55,
+          marginTop: 30,
+        }}>
+          <div style={{
+            fontFamily: '"IBM Plex Mono", monospace', fontSize: 11,
+            letterSpacing: 1.5, color: '#8a8275', marginBottom: 10,
+            textTransform: 'uppercase',
+          }}>Grid rules</div>
+          <ul style={{ paddingLeft: 18, margin: 0 }}>
+            <li style={{ marginBottom: 10 }}>No two black posts vertically adjacent in the same column</li>
+            <li style={{ marginBottom: 10 }}>Acid appears at most 1× per 9-tile window</li>
+            <li style={{ marginBottom: 10 }}>At least 1 image-led post per row</li>
+            <li style={{ marginBottom: 10 }}>Rider quotes always sit between a product post and an event post</li>
+            <li>Takedown posts always land on Tuesday — our most engaged day</li>
+          </ul>
+        </div>
+      </Section>
+
+      {/* Footer notes */}
+      <div style={{ padding: '40px 60px 100px', fontFamily: 'system-ui', fontSize: 14, color: '#8a8275', maxWidth: 900 }}>
+        Next — real photography replaces stripes, lock the type system (currently Inter Tight / Instrument Serif / Plex Mono),
+        expand to email templates + Strava segment cards + performance clinic posters.
+      </div>
+    </DesignCanvas>
+  );
+}
+
+Object.assign(window, { App });
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+
+</script>
+</body>
+</html>
